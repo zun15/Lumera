@@ -1,0 +1,45 @@
+name: Build APK
+
+# Builds a debug APK in GitHub's cloud. Run it from the Actions tab ("Run workflow"),
+# or it runs by itself every time you push changes.
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Optional: a free TMDB key (Settings > Secrets > TMDB_API_KEY) turns on TMDB details
+      # (backdrops, logos, cast). Without it the app still builds; those extras are just empty.
+      - name: Write local.properties
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: echo "tmdb.api_key=${TMDB_API_KEY}" > local.properties
+
+      - name: Build debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Save the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumera-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
