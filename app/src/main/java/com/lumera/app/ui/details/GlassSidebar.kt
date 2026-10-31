@@ -27,9 +27,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.lumera.app.data.model.ParsedStreamInfo
+import com.lumera.app.data.model.StreamQuality
+import com.lumera.app.data.stream.StreamParser
 import com.lumera.app.ui.home.DpadRepeatGate
 import com.lumera.app.data.model.stremio.MetaVideo
 import com.lumera.app.data.model.stremio.Stream
@@ -297,6 +301,77 @@ fun EpisodesContent(
     }
 }
 
+// --- QUICK FILTERS (sources panel) ---
+
+private const val FILTER_ALL = "All"
+private val QUALITY_FILTER_OPTIONS = listOf(FILTER_ALL, "4K", "1080p", "720p", "Lower")
+private val EDITION_FILTER_OPTIONS = listOf(FILTER_ALL, "IMAX")
+private val IMAGE_FILTER_OPTIONS = listOf(FILTER_ALL, "Dolby Vision", "HDR", "No HDR")
+
+private fun matchesQualityFilter(option: String, quality: StreamQuality): Boolean = when (option) {
+    "4K" -> quality == StreamQuality.UHD_4K
+    "1080p" -> quality == StreamQuality.FHD_1080P
+    "720p" -> quality == StreamQuality.HD_720P
+    // "Lower" also catches sources whose quality could not be read, so nothing is hidden by accident.
+    "Lower" -> quality == StreamQuality.SD_480P || quality == StreamQuality.CAM || quality == StreamQuality.UNKNOWN
+    else -> true
+}
+
+private fun matchesEditionFilter(option: String, info: ParsedStreamInfo): Boolean = when (option) {
+    "IMAX" -> info.isImax
+    else -> true
+}
+
+private fun matchesImageFilter(option: String, info: ParsedStreamInfo): Boolean {
+    val hasDv = "dv" in info.formats
+    val hasHdr = "hdr" in info.formats
+    return when (option) {
+        "Dolby Vision" -> hasDv
+        // Many Dolby Vision releases also carry an HDR10 fallback, so "HDR" includes them.
+        "HDR" -> hasHdr || hasDv
+        "No HDR" -> !hasDv && !hasHdr
+        else -> true
+    }
+}
+
+// --- SOURCE TAGS ---
+// Muted tones for quality / image (supporting info); vivid tones for IMAX / LATINO (what should pop out).
+
+private data class SourceTag(val label: String, val background: Color, val textColor: Color)
+
+private fun buildSourceTags(info: ParsedStreamInfo): List<SourceTag> {
+    val tags = mutableListOf<SourceTag>()
+    val quality = when (info.quality) {
+        StreamQuality.UHD_4K -> "4K"
+        StreamQuality.FHD_1080P -> "1080p"
+        StreamQuality.HD_720P -> "720p"
+        StreamQuality.SD_480P -> "SD"
+        StreamQuality.CAM -> "CAM"
+        StreamQuality.UNKNOWN -> null
+    }
+    if (quality != null) tags += SourceTag(quality, Color(0xFF2B3A55), Color(0xFFBFD0F0))
+    // One image tag only: Dolby Vision wins over HDR (DV releases usually carry an HDR10 fallback too).
+    when {
+        "dv" in info.formats -> tags += SourceTag("DV", Color(0xFF3F2F5C), Color(0xFFD7C6F5))
+        "hdr" in info.formats -> tags += SourceTag("HDR", Color(0xFF1F4A4A), Color(0xFFBDE8E8))
+    }
+    if (info.isImax) tags += SourceTag("IMAX", Color(0xFFE6A010), Color(0xFF1A1200))
+    if (info.isLatino) tags += SourceTag("LATINO", Color(0xFF2EB85C), Color(0xFF06210F))
+    return tags
+}
+
+@Composable
+private fun SourceTagChip(tag: SourceTag) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(tag.background)
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+    ) {
+        Text(tag.label, style = MaterialTheme.typography.labelSmall, color = tag.textColor, fontWeight = FontWeight.Bold)
+    }
+}
+
 // --- CONTENT: SOURCES ---
 
 @OptIn(ExperimentalComposeUiApi::class)
@@ -311,13 +386,28 @@ fun SourcesContent(
 ) {
     val actualStreams = streams ?: emptyList()
     var filter by remember { mutableStateOf("All Addons") }
+    // Quick filters. They combine with each other (AND) and with the addon filter:
+    // e.g. Edition = IMAX + Image = Dolby Vision shows only IMAX sources that are Dolby Vision.
+    var qualityFilter by remember { mutableStateOf(FILTER_ALL) }
+    var editionFilter by remember { mutableStateOf(FILTER_ALL) }
+    var imageFilter by remember { mutableStateOf(FILTER_ALL) }
 
     val addonNames = remember(actualStreams) {
         listOf("All Addons") + actualStreams.mapNotNull { it.name?.substringAfter("[")?.substringBefore("]") }.distinct()
     }
 
-    val filtered = remember(actualStreams, filter) {
-        actualStreams.filter { filter == "All Addons" || (it.name?.contains(filter) == true) }
+    // Parse each stream once; the parsed info drives the quick filters.
+    val parsedStreams = remember(actualStreams) { actualStreams.map { it to StreamParser.parse(it) } }
+
+    val filtered = remember(parsedStreams, filter, qualityFilter, editionFilter, imageFilter) {
+        parsedStreams
+            .filter { (stream, info) ->
+                (filter == "All Addons" || (stream.name?.contains(filter) == true)) &&
+                    matchesQualityFilter(qualityFilter, info.quality) &&
+                    matchesEditionFilter(editionFilter, info) &&
+                    matchesImageFilter(imageFilter, info)
+            }
+            .map { it.first }
     }
 
     val selectedIndex = remember(filtered, selectedStreamId) {
@@ -359,14 +449,40 @@ fun SourcesContent(
                 }
             }
         } else {
-            FilterDropdown(
-                currentValue = filter,
-                options = addonNames,
-                modifier = Modifier
-                    .focusProperties { up = FocusRequester.Cancel }
-                    .onPreviewKeyEvent { it.key == Key.DirectionLeft && it.type == KeyEventType.KeyDown },
-                onSelect = { filter = it }
-            )
+            // 2x2 grid of filters. Left/right focus is trapped at the grid edges so D-pad focus
+            // never escapes the sidebar; "up" is blocked on the top row (same as the original dropdown).
+            val trapLeft = Modifier.onPreviewKeyEvent { it.key == Key.DirectionLeft && it.type == KeyEventType.KeyDown }
+            val trapRight = Modifier.onPreviewKeyEvent { it.key == Key.DirectionRight && it.type == KeyEventType.KeyDown }
+            val blockUp = Modifier.focusProperties { up = FocusRequester.Cancel }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterDropdown(
+                    currentValue = filter,
+                    options = addonNames,
+                    modifier = Modifier.weight(1f).then(blockUp).then(trapLeft),
+                    onSelect = { filter = it }
+                )
+                FilterDropdown(
+                    currentValue = qualityFilter,
+                    options = QUALITY_FILTER_OPTIONS,
+                    modifier = Modifier.weight(1f).then(blockUp).then(trapRight),
+                    onSelect = { qualityFilter = it }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterDropdown(
+                    currentValue = editionFilter,
+                    options = EDITION_FILTER_OPTIONS,
+                    modifier = Modifier.weight(1f).then(trapLeft),
+                    onSelect = { editionFilter = it }
+                )
+                FilterDropdown(
+                    currentValue = imageFilter,
+                    options = IMAGE_FILTER_OPTIONS,
+                    modifier = Modifier.weight(1f).then(trapRight),
+                    onSelect = { imageFilter = it }
+                )
+            }
             Spacer(Modifier.height(16.dp))
             LazyColumn(
                 state = listState,
@@ -774,6 +890,7 @@ fun RawSourceItem(stream: Stream, isPlaying: Boolean = false, modifier: Modifier
     val primary = MaterialTheme.colorScheme.primary
     val mainText = stream.description ?: stream.title ?: stream.name ?: "Unknown"
     val subText = stream.name ?: ""
+    val tags = remember(stream) { buildSourceTags(StreamParser.parse(stream)) }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = if (isFocused) Color.White.copy(0.1f) else Color.White.copy(0.05f)),
@@ -782,6 +899,11 @@ fun RawSourceItem(stream: Stream, isPlaying: Boolean = false, modifier: Modifier
             .clickable(onClick = onClick)
     ) {
         Column(Modifier.padding(16.dp)) {
+            if (tags.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 8.dp)) {
+                    tags.forEach { SourceTagChip(it) }
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(mainText, style = MaterialTheme.typography.bodyLarge, color = if (isFocused) Color.White else Color.LightGray, modifier = Modifier.weight(1f))
                 if (isPlaying) {

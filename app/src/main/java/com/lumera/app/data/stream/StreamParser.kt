@@ -23,13 +23,26 @@ object StreamParser {
     private val av1Pattern = Regex("""(?i)\bav1\b""")
     private val threeDPattern = Regex("""(?i)\b(3d|sbs|half.?sbs|hou)\b""")
 
+    // IMAX is an edition, not an image format: a stream can be IMAX *and* Dolby Vision/HDR,
+    // so it is kept as its own flag instead of being mixed into `formats`.
+    // Lookarounds instead of \b so names like "Movie_IMAX_2160p" (underscore = word char) still match.
+    private val imaxPattern = Regex("""(?i)(?<![a-z0-9])imax(?![a-z0-9])""")
+
+    // Best effort: addons word Latin Spanish differently ("Latino", "Dual Latino", flag emoji, es-MX...).
+    // Kept deliberately strict to avoid false positives (no bare "lat").
+    private val latinoPattern = Regex(
+        """(?i)((?<![a-z0-9])(latino|latam|dual[-_. ]?lat|spa[-_. ]?lat|es[-_.]?(mx|la|419))(?![a-z0-9])|🇲🇽)"""
+    )
+
     fun parse(stream: Stream): ParsedStreamInfo {
         val text = combinedText(stream)
         return ParsedStreamInfo(
             quality = extractQuality(stream),
             sizeBytes = stream.behaviorHints?.videoSize ?: extractSizeBytes(text),
             seeds = extractSeeds(text),
-            formats = extractFormats(text)
+            formats = extractFormats(text),
+            isImax = imaxPattern.containsMatchIn(text),
+            isLatino = latinoPattern.containsMatchIn(text)
         )
     }
 
