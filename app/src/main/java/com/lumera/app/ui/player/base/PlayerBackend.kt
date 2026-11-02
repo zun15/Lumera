@@ -10,6 +10,7 @@ interface PlayerPlaybackController {
     val sourceOptions: StateFlow<List<PlayerSourceOption>>
     val audioTracks: StateFlow<List<PlayerTrackOption>>
     val subtitleTracks: StateFlow<List<PlayerTrackOption>>
+    val streamInfo: StateFlow<PlayerStreamInfo>
 
     fun load(request: PlayerLoadRequest)
 

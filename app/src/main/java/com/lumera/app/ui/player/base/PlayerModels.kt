@@ -2,6 +2,13 @@ package com.lumera.app.ui.player.base
 
 import androidx.compose.runtime.Immutable
 
+/** What is actually being played (read from the player), for the info strip next to the controls. */
+@Immutable
+data class PlayerStreamInfo(
+    val video: String = "",
+    val audio: String = ""
+)
+
 @Immutable
 data class PlayerSourceOption(
     val id: String,

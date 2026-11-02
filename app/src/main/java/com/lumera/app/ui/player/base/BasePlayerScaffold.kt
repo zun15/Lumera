@@ -184,6 +184,7 @@ fun BasePlayerScaffold(
     val sources by playbackController.sourceOptions.collectAsState()
     val audioTracks by playbackController.audioTracks.collectAsState()
     val subtitleTracks by playbackController.subtitleTracks.collectAsState()
+    val streamInfo by playbackController.streamInfo.collectAsState()
 
     val currentSourceUrl = sources.firstOrNull { it.id == uiState.currentSourceId }?.url
 
@@ -669,6 +670,31 @@ fun BasePlayerScaffold(
                 durationMs = uiState.durationMs,
                 positionMs = displayPositionMs
             )
+        }
+
+        // What is actually playing (resolution, codec, HDR/Dolby Vision, audio), shown with the controls.
+        AnimatedVisibility(
+            visible = !isTrailer && showControls && !panelOpen && !showSubtitleOffsetBar && !showSubtitleSizeBar && !showSubtitleDelayBar && !showSubtitleColorBar && uiState.errorMessage.isNullOrBlank() &&
+                (streamInfo.video.isNotBlank() || streamInfo.audio.isNotBlank()),
+            enter = fadeIn(animationSpec = tween(200)),
+            exit = fadeOut(animationSpec = tween(200)),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(top = 74.dp, start = 36.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                if (streamInfo.video.isNotBlank()) {
+                    Text(streamInfo.video, color = Color.White, style = MaterialTheme.typography.bodySmall)
+                }
+                if (streamInfo.audio.isNotBlank()) {
+                    Text(streamInfo.audio, color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.bodySmall)
+                }
+            }
         }
 
         AnimatedVisibility(

@@ -108,6 +108,7 @@ class DetailsViewModel @Inject constructor(
     private var prefetchStreamsJob: Job? = null
     private var prefetchedStreamKey: String? = null
     private var prefetchedStreams: List<Stream>? = null
+    private val prefetchPartial = MutableStateFlow<List<Stream>>(emptyList())
     private var prefetchedSubtitles: List<AddonSubtitle>? = null
 
 
@@ -600,9 +601,17 @@ class DetailsViewModel @Inject constructor(
         prefetchedStreamKey = key
         prefetchedStreams = null
         prefetchedSubtitles = null
+        prefetchPartial.value = emptyList()
         prefetchStreamsJob = viewModelScope.launch {
             try {
-                val streamsDeferred = async { repository.getStreams(type, id) }
+                val streamsDeferred = async {
+                    var acc: List<Stream> = emptyList()
+                    repository.getStreamsProgressive(type, id).collect {
+                        acc = it
+                        prefetchPartial.value = it
+                    }
+                    acc
+                }
                 val subtitlesDeferred = async { subtitleRepository.getSubtitles(type, id) }
                 prefetchedStreams = streamsDeferred.await()
                 prefetchedSubtitles = subtitlesDeferred.await()
@@ -610,6 +619,21 @@ class DetailsViewModel @Inject constructor(
                 // Prefetch failed silently — loadStreams will fetch fresh
             }
         }
+    }
+
+    /** Applies the active profile's source sorting/filtering preferences. */
+    private suspend fun sortStreamsForProfile(rawStreams: List<Stream>): List<Stream> {
+        val activeProfileId = profileConfigurationManager.getLastActiveProfileId()
+        val profile = activeProfileId?.let { dao.getProfileById(it) }
+
+        return if (profile?.sourceSortingEnabled != false) {
+            val enabledQualities = StreamSortingService.parseEnabledQualities(profile?.sourceEnabledQualities ?: "4k,1080p,720p,unknown")
+            val excludePhrases = StreamSortingService.parseExcludePhrases(profile?.sourceExcludePhrases ?: "")
+            val addonSortOrders = dao.getAllAddons().firstOrNull()
+                ?.associate { it.transportUrl to it.sortOrder } ?: emptyMap()
+            val excludedFormats = StreamSortingService.parseExcludedFormats(profile?.sourceExcludedFormats ?: "")
+            streamSortingService.sortAndFilter(rawStreams, enabledQualities, excludePhrases, addonSortOrders, profile?.sourceSortPrimary ?: "quality", profile?.sourceMaxSizeGb ?: 0, excludedFormats)
+        } else rawStreams
     }
 
     // 2. Open Sources (Movie OR Specific Episode)
@@ -640,9 +664,54 @@ class DetailsViewModel @Inject constructor(
             )
 
             try {
+                val prefetchKey = "$type:$id"
+
+                // Manual source picker: show results as each addon answers instead of
+                // waiting for the slowest one.
+                if (showSidebar) {
+                    val finalRaw: List<Stream>
+                    val subs: List<AddonSubtitle>
+                    val showPartial: suspend (List<Stream>) -> Unit = { partial ->
+                        if (partial.isNotEmpty()) {
+                            _state.value = _state.value.copy(
+                                sidebarState = SidebarState.Sources(
+                                    displayTitle, sortStreamsForProfile(partial), isLoadingMore = true
+                                )
+                            )
+                        }
+                    }
+                    if (prefetchedStreamKey == prefetchKey && prefetchedStreams != null) {
+                        finalRaw = prefetchedStreams!!
+                        subs = prefetchedSubtitles ?: emptyList()
+                    } else if (prefetchedStreamKey == prefetchKey && prefetchStreamsJob != null) {
+                        val collector = launch { prefetchPartial.collect { showPartial(it) } }
+                        prefetchStreamsJob?.join()
+                        collector.cancel()
+                        finalRaw = prefetchedStreams ?: prefetchPartial.value
+                        subs = prefetchedSubtitles ?: emptyList()
+                    } else {
+                        val subsDeferred = async { subtitleRepository.getSubtitles(type, id) }
+                        var acc: List<Stream> = emptyList()
+                        repository.getStreamsProgressive(type, id).collect {
+                            acc = it
+                            showPartial(it)
+                        }
+                        finalRaw = acc
+                        subs = subsDeferred.await()
+                    }
+                    val sorted = sortStreamsForProfile(finalRaw)
+                    _state.value = _state.value.copy(
+                        isLoadingStreams = false,
+                        autoPlayStream = null,
+                        addonSubtitles = subs,
+                        availableStreams = sorted,
+                        sidebarState = SidebarState.Sources(displayTitle, sorted)
+                    )
+                    return@launch
+                }
+
                 val rawStreams: List<Stream>
                 val addonSubtitles: List<AddonSubtitle>
-                val prefetchKey = "$type:$id"
 
                 if (prefetchedStreamKey == prefetchKey) {
                     prefetchStreamsJob?.join()
@@ -662,18 +731,7 @@ class DetailsViewModel @Inject constructor(
                     addonSubtitles = subtitlesDeferred.await()
                 }
 
-                // Read sorting preferences from the active profile
-                val activeProfileId = profileConfigurationManager.getLastActiveProfileId()
-                val profile = activeProfileId?.let { dao.getProfileById(it) }
-
-                val streams = if (profile?.sourceSortingEnabled != false) {
-                    val enabledQualities = StreamSortingService.parseEnabledQualities(profile?.sourceEnabledQualities ?: "4k,1080p,720p,unknown")
-                    val excludePhrases = StreamSortingService.parseExcludePhrases(profile?.sourceExcludePhrases ?: "")
-                    val addonSortOrders = dao.getAllAddons().firstOrNull()
-                        ?.associate { it.transportUrl to it.sortOrder } ?: emptyMap()
-                    val excludedFormats = StreamSortingService.parseExcludedFormats(profile?.sourceExcludedFormats ?: "")
-                    streamSortingService.sortAndFilter(rawStreams, enabledQualities, excludePhrases, addonSortOrders, profile?.sourceSortPrimary ?: "quality", profile?.sourceMaxSizeGb ?: 0, excludedFormats)
-                } else rawStreams
+                val streams = sortStreamsForProfile(rawStreams)
 
                 val preferredStream = if (forceSourcePicker || !rememberSourceSelection) {
                     null

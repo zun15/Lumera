@@ -29,6 +29,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -118,6 +119,9 @@ class ExoPlayerBackend(
 
     private val _subtitleTracks = MutableStateFlow<List<PlayerTrackOption>>(emptyList())
     override val subtitleTracks: StateFlow<List<PlayerTrackOption>> = _subtitleTracks
+
+    private val _streamInfo = MutableStateFlow(PlayerStreamInfo())
+    override val streamInfo: StateFlow<PlayerStreamInfo> = _streamInfo
 
     private val _playerReady = MutableStateFlow<ExoPlayer?>(null)
 
@@ -237,6 +241,81 @@ class ExoPlayerBackend(
     private val audioTrackLocators = mutableMapOf<String, TrackLocator>()
     private val subtitleTrackLocators = mutableMapOf<String, TrackLocator>()
 
+    /** Builds the "3840×2160 · HEVC · HDR10 · 23.976 fps" style text from the tracks being played. */
+    private fun updateStreamInfo(tracks: Tracks) {
+        fun selectedFormat(type: Int): Format? {
+            for (group in tracks.groups) {
+                if (group.type != type) continue
+                for (i in 0 until group.length) {
+                    if (group.isTrackSelected(i)) return group.getTrackFormat(i)
+                }
+            }
+            return null
+        }
+
+        val v = selectedFormat(C.TRACK_TYPE_VIDEO)
+        val a = selectedFormat(C.TRACK_TYPE_AUDIO)
+
+        val video = if (v == null) "" else buildList {
+            if (v.width > 0 && v.height > 0) add("${v.width}×${v.height}")
+            val codecs = v.codecs.orEmpty().lowercase()
+            val isDv = v.sampleMimeType == MimeTypes.VIDEO_DOLBY_VISION ||
+                codecs.startsWith("dvh") || codecs.startsWith("dva") || codecs.startsWith("dav1")
+            val codec = when (v.sampleMimeType) {
+                MimeTypes.VIDEO_H265 -> "HEVC"
+                MimeTypes.VIDEO_H264 -> "H.264"
+                MimeTypes.VIDEO_AV1 -> "AV1"
+                MimeTypes.VIDEO_VP9 -> "VP9"
+                MimeTypes.VIDEO_MPEG2 -> "MPEG-2"
+                MimeTypes.VIDEO_DOLBY_VISION -> "Dolby Vision"
+                else -> null
+            }
+            if (codec != null) add(codec)
+            when {
+                isDv -> add("Dolby Vision")
+                v.colorInfo?.colorTransfer == C.COLOR_TRANSFER_ST2084 -> add("HDR10")
+                v.colorInfo?.colorTransfer == C.COLOR_TRANSFER_HLG -> add("HLG")
+                else -> add("SDR")
+            }
+            val fps = v.frameRate
+            if (fps > 0f) {
+                val rounded = Math.round(fps).toFloat()
+                add(if (Math.abs(fps - rounded) < 0.01f) "${rounded.toInt()} fps" else String.format(java.util.Locale.US, "%.3f fps", fps))
+            }
+            val bitrate = if (v.averageBitrate > 0) v.averageBitrate else v.bitrate
+            if (bitrate > 0) add(String.format(java.util.Locale.US, "%.1f Mbps", bitrate / 1_000_000f))
+        }.joinToString(" · ")
+
+        val audio = if (a == null) "" else buildList {
+            val codecs = a.codecs.orEmpty().lowercase()
+            val codec = when (a.sampleMimeType) {
+                MimeTypes.AUDIO_E_AC3 -> "Dolby Digital Plus"
+                MimeTypes.AUDIO_E_AC3_JOC -> "Dolby Atmos"
+                MimeTypes.AUDIO_AC3 -> "Dolby Digital"
+                MimeTypes.AUDIO_TRUEHD -> "Dolby TrueHD"
+                MimeTypes.AUDIO_DTS -> "DTS"
+                MimeTypes.AUDIO_DTS_HD -> "DTS-HD"
+                MimeTypes.AUDIO_DTS_EXPRESS -> "DTS Express"
+                MimeTypes.AUDIO_AAC -> "AAC"
+                MimeTypes.AUDIO_OPUS -> "Opus"
+                MimeTypes.AUDIO_FLAC -> "FLAC"
+                MimeTypes.AUDIO_MPEG -> "MP3"
+                else -> null
+            }
+            if (codec != null) add(if (codec == "Dolby Digital Plus" && codecs.contains("ec+3")) "Dolby Atmos" else codec)
+            when (a.channelCount) {
+                1 -> add("1.0")
+                2 -> add("2.0")
+                6 -> add("5.1")
+                8 -> add("7.1")
+                in 3..Int.MAX_VALUE -> add("${a.channelCount} ch")
+            }
+            a.language?.takeIf { it.isNotBlank() && it != "und" }?.let { add(it.uppercase()) }
+        }.joinToString(" · ")
+
+        _streamInfo.value = PlayerStreamInfo(video = video, audio = audio)
+    }
+
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             _uiState.update {
@@ -288,7 +367,12 @@ class ExoPlayerBackend(
             _uiState.update { it.copy(hasRenderedFirstFrame = true) }
         }
 
+        override fun onVideoSizeChanged(videoSize: VideoSize) {
+            exoPlayer?.let { updateStreamInfo(it.currentTracks) }
+        }
+
         override fun onTracksChanged(tracks: Tracks) {
+            updateStreamInfo(tracks)
             refreshTrackOptions(tracks)
             applyPendingTrackSelections()
             if (playbackSettings.assRendererEnabled) syncAssTrackWithExoPlayer(tracks)

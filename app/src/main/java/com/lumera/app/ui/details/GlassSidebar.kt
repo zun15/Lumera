@@ -46,7 +46,7 @@ import kotlinx.coroutines.launch
 sealed class SidebarState {
     data object Closed : SidebarState()
     data class Episodes(val videos: List<MetaVideo>) : SidebarState()
-    data class Sources(val streamTitle: String, val streams: List<Stream>?, val selectedStreamId: String? = null) : SidebarState()
+    data class Sources(val streamTitle: String, val streams: List<Stream>?, val selectedStreamId: String? = null, val isLoadingMore: Boolean = false) : SidebarState()
 }
 
 // Handles Back key for sidebar dismissal. Left trapping is handled per-item via focusProperties.
@@ -191,6 +191,7 @@ fun GlassSidebar(
                     title = current.streamTitle,
                     streams = current.streams,
                     selectedStreamId = current.selectedStreamId,
+                    isLoadingMore = current.isLoadingMore,
                     focusRequester = focusRequester,
                     onSourceClick = onSourceSelected,
                     onBack = onBack
@@ -306,6 +307,7 @@ fun EpisodesContent(
 private const val FILTER_ALL = "All"
 private val QUALITY_FILTER_OPTIONS = listOf(FILTER_ALL, "4K", "1080p", "720p", "Lower")
 private val EDITION_FILTER_OPTIONS = listOf(FILTER_ALL, "IMAX")
+private val LANGUAGE_FILTER_OPTIONS = listOf("All", "Latino")
 private val IMAGE_FILTER_OPTIONS = listOf(FILTER_ALL, "Dolby Vision", "HDR", "No HDR")
 
 private fun matchesQualityFilter(option: String, quality: StreamQuality): Boolean = when (option) {
@@ -380,6 +382,7 @@ fun SourcesContent(
     title: String,
     streams: List<Stream>?,
     selectedStreamId: String? = null,
+    isLoadingMore: Boolean = false,
     focusRequester: FocusRequester,
     onSourceClick: (Stream) -> Unit,
     onBack: () -> Unit
@@ -391,6 +394,7 @@ fun SourcesContent(
     var qualityFilter by remember { mutableStateOf(FILTER_ALL) }
     var editionFilter by remember { mutableStateOf(FILTER_ALL) }
     var imageFilter by remember { mutableStateOf(FILTER_ALL) }
+    var languageFilter by remember { mutableStateOf(FILTER_ALL) }
 
     val addonNames = remember(actualStreams) {
         listOf("All Addons") + actualStreams.mapNotNull { it.name?.substringAfter("[")?.substringBefore("]") }.distinct()
@@ -399,13 +403,14 @@ fun SourcesContent(
     // Parse each stream once; the parsed info drives the quick filters.
     val parsedStreams = remember(actualStreams) { actualStreams.map { it to StreamParser.parse(it) } }
 
-    val filtered = remember(parsedStreams, filter, qualityFilter, editionFilter, imageFilter) {
+    val filtered = remember(parsedStreams, filter, qualityFilter, editionFilter, imageFilter, languageFilter) {
         parsedStreams
             .filter { (stream, info) ->
                 (filter == "All Addons" || (stream.name?.contains(filter) == true)) &&
                     matchesQualityFilter(qualityFilter, info.quality) &&
                     matchesEditionFilter(editionFilter, info) &&
-                    matchesImageFilter(imageFilter, info)
+                    matchesImageFilter(imageFilter, info) &&
+                    (languageFilter == FILTER_ALL || (languageFilter == "Latino" && info.isLatino))
             }
             .map { it.first }
     }
@@ -432,6 +437,9 @@ fun SourcesContent(
     Column {
         Text("Select Source", style = MaterialTheme.typography.titleLarge, color = Color.White)
         Text(title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+        if (isLoadingMore && streams != null) {
+            Text("Still searching other addons...", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        }
         Spacer(Modifier.height(16.dp))
 
         if (streams == null) {
@@ -456,12 +464,14 @@ fun SourcesContent(
             val blockUp = Modifier.focusProperties { up = FocusRequester.Cancel }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterDropdown(
+                    label = "Addon",
                     currentValue = filter,
                     options = addonNames,
                     modifier = Modifier.weight(1f).then(blockUp).then(trapLeft),
                     onSelect = { filter = it }
                 )
                 FilterDropdown(
+                    label = "Quality",
                     currentValue = qualityFilter,
                     options = QUALITY_FILTER_OPTIONS,
                     modifier = Modifier.weight(1f).then(blockUp).then(trapRight),
@@ -471,17 +481,30 @@ fun SourcesContent(
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterDropdown(
+                    label = "Edition",
                     currentValue = editionFilter,
                     options = EDITION_FILTER_OPTIONS,
                     modifier = Modifier.weight(1f).then(trapLeft),
                     onSelect = { editionFilter = it }
                 )
                 FilterDropdown(
+                    label = "Image",
                     currentValue = imageFilter,
                     options = IMAGE_FILTER_OPTIONS,
                     modifier = Modifier.weight(1f).then(trapRight),
                     onSelect = { imageFilter = it }
                 )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterDropdown(
+                    label = "Language",
+                    currentValue = languageFilter,
+                    options = LANGUAGE_FILTER_OPTIONS,
+                    modifier = Modifier.weight(1f).then(trapLeft),
+                    onSelect = { languageFilter = it }
+                )
+                Spacer(Modifier.weight(1f))
             }
             Spacer(Modifier.height(16.dp))
             LazyColumn(
@@ -510,7 +533,7 @@ fun SourcesContent(
 // --- ITEMS & UI COMPONENTS ---
 
 @Composable
-fun FilterDropdown(currentValue: String, options: List<String>, modifier: Modifier, onSelect: (String) -> Unit) {
+fun FilterDropdown(currentValue: String, options: List<String>, modifier: Modifier, onSelect: (String) -> Unit, label: String = "") {
     var expanded by remember { mutableStateOf(false) }
     var isFocused by remember { mutableStateOf(false) }
 
@@ -534,7 +557,16 @@ fun FilterDropdown(currentValue: String, options: List<String>, modifier: Modifi
                 .border(if (isFocused) 2.dp else 0.dp, if (isFocused) primary else Color.Transparent, RoundedCornerShape(8.dp)),
             shape = RoundedCornerShape(8.dp)
         ) {
-            Text(currentValue, color = if(isFocused) Color.White else Color.LightGray, modifier = Modifier.weight(1f))
+            Text(
+                text = when {
+                    label.isBlank() -> currentValue
+                    currentValue == "All Addons" -> "$label: All"
+                    else -> "$label: $currentValue"
+                },
+                color = if(isFocused) Color.White else Color.LightGray,
+                maxLines = 1,
+                modifier = Modifier.weight(1f)
+            )
             Icon(Icons.Default.ArrowDropDown, null, tint = if(isFocused) primary else Color.Gray)
         }
 

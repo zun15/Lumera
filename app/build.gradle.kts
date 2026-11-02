@@ -62,6 +62,15 @@ android {
             applicationIdSuffix = ".test"
             resValue("string", "app_name", "Lumera Test")
         }
+        // Optimized build for testing on the TV: same optimizations as release (R8, no debug
+        // overhead) but signed with the debug key so it installs without a private keystore.
+        create("fast") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".test"
+            resValue("string", "app_name", "Lumera Test")
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true

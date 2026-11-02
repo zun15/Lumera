@@ -18,6 +18,9 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -338,6 +341,39 @@ class AddonRepository @Inject constructor(
         }
 
         jobs.awaitAll().flatten()
+    }
+
+    /**
+     * Same as [getStreams], but emits the accumulated list every time an addon answers,
+     * so the UI can show the fast addons right away instead of waiting for the slowest one.
+     * The flow completes when every addon has answered (or timed out).
+     */
+    fun getStreamsProgressive(type: String, id: String): Flow<List<Stream>> = channelFlow {
+        val addons = dao.getAllAddons().firstOrNull()
+            ?.filter { it.isEnabled && it.supportsStream }
+            ?: emptyList()
+        val collected = mutableListOf<Pair<Int, List<Stream>>>()
+        val lock = Any()
+        addons.mapIndexed { index, addon ->
+            launch(Dispatchers.IO) {
+                val result = try {
+                    val url = "${addon.transportUrl}/stream/$type/$id.json"
+                    val response = withTimeout(STREAM_TIMEOUT_MS) { api.getStreams(url) }
+                    val sourceLabel = addon.nickname ?: addon.name
+                    response.streams.orEmpty().map { stream ->
+                        stream.copy(
+                            name = "[$sourceLabel] ${stream.name ?: ""}".trim(),
+                            addonTransportUrl = addon.transportUrl
+                        )
+                    }
+                } catch (e: Exception) { emptyList<Stream>() }
+                val snapshot = synchronized(lock) {
+                    collected.add(index to result)
+                    collected.sortedBy { it.first }.flatMap { it.second }
+                }
+                send(snapshot)
+            }
+        }
     }
 
     suspend fun getAddonSortOrders(): Map<String, Int> = withContext(Dispatchers.IO) {
